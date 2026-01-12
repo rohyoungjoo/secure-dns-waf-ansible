@@ -1,0 +1,75 @@
+---
+# PC1-SECURE: command-only role (no external collections/modules)
+
+- name: Install required packages (firewalld, iproute)
+  command: dnf -y install firewalld iproute
+  changed_when: false
+
+- name: Enable and start firewalld
+  command: systemctl enable --now firewalld
+
+# ---- sysctl (persistent + apply) ----
+- name: Persist sysctl settings for forwarding and rp_filter
+  copy:
+    dest: /etc/sysctl.d/99-pc1-secure.conf
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      net.ipv4.ip_forward = 1
+      net.ipv4.conf.all.rp_filter = 2
+      net.ipv4.conf.default.rp_filter = 2
+      net.ipv4.conf.ens160.rp_filter = 2
+      net.ipv4.conf.ens192.rp_filter = 2
+
+- name: Apply sysctl settings now
+  command: sysctl --system
+
+# ---- firewalld zones/interfaces/sources ----
+- name: Ensure ens160 is assigned to public zone (permanent)
+  command: firewall-cmd --permanent --zone=public --add-interface=ens160
+  register: r_pub_if
+  failed_when: false
+  changed_when: "'success' in (r_pub_if.stdout | lower)"
+
+- name: Ensure ens192 is assigned to trusted zone (permanent)
+  command: firewall-cmd --permanent --zone=trusted --add-interface=ens192
+  register: r_tru_if
+  failed_when: false
+  changed_when: "'success' in (r_tru_if.stdout | lower)"
+
+- name: Ensure trusted zone allows source 10.2.2.0/24 (permanent)
+  command: firewall-cmd --permanent --zone=trusted --add-source=10.2.2.0/24
+  register: r_tru_src
+  failed_when: false
+  changed_when: "'success' in (r_tru_src.stdout | lower)"
+
+- name: Enable masquerade on public zone (permanent)
+  command: firewall-cmd --permanent --zone=public --add-masquerade
+  register: r_masq
+  failed_when: false
+  changed_when: "'success' in (r_masq.stdout | lower)"
+
+- name: Reload firewalld to apply permanent rules
+  command: firewall-cmd --reload
+
+# ---- DNAT: External -> WAF ----
+- name: Forward external HTTP(80) to WAF 10.2.1.2:80 (permanent)
+  command: firewall-cmd --permanent --zone=public --add-forward-port=port=80:proto=tcp:toport=80:toaddr=10.2.1.2
+  register: r_fwd80
+  failed_when: false
+  changed_when: "'success' in (r_fwd80.stdout | lower)"
+
+- name: Forward external HTTPS(443) to WAF 10.2.1.2:443 (permanent)
+  command: firewall-cmd --permanent --zone=public --add-forward-port=port=443:proto=tcp:toport=443:toaddr=10.2.1.2
+  register: r_fwd443
+  failed_when: false
+  changed_when: "'success' in (r_fwd443.stdout | lower)"
+
+# ---- DNAT: External HTTPS -> WAF ----
+- name: Forward external HTTPS(443) to WAF 10.2.1.2:443 (permanent)
+  command: firewall-cmd --permanent --zone=public \
+           --add-forward-port=port=443:proto=tcp:toport=443:toaddr=10.2.1.2
+  register: r_fwd443
+  failed_when: false
+  changed_when: "'success' in (r_fwd443.stdout | lower)"

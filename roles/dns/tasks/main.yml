@@ -1,0 +1,23 @@
+---
+- name: Install bind
+  command: dnf -y install bind bind-utils
+  changed_when: false
+
+- name: Enable and start named
+  command: systemctl enable --now named
+
+- name: Install firewalld
+  command: dnf -y install firewalld
+  changed_when: false
+
+- name: Enable and start firewalld
+  command: systemctl enable --now firewalld
+
+- name: Open DNS service (permanent)
+  command: firewall-cmd --permanent --add-service=dns
+  register: r_dns
+  failed_when: false
+  changed_when: "'success' in (r_dns.stdout | lower)"
+
+- name: Reload firewalld
+  command: firewall-cmd --reload

@@ -1,0 +1,26 @@
+---
+# PC1-WAF: command-only role (CRS activate + DetectionOnly)
+
+- name: Activate OWASP CRS rules into activated_rules (symlink)
+  shell: |
+    set -e
+    SRC="/usr/share/mod_modsecurity_crs/rules"
+    DST="/etc/httpd/modsecurity.d/activated_rules"
+    mkdir -p "$DST"
+
+    for f in "$SRC"/*.conf; do
+      ln -sf "$f" "$DST/$(basename "$f")"
+    done
+
+    echo "Activated CRS from: $SRC"
+    echo "Count: $(ls -1 "$DST"/*.conf 2>/dev/null | wc -l)"
+
+- name: Set SecRuleEngine to DetectionOnly
+  shell: |
+    set -e
+    CONF="/etc/httpd/conf.d/mod_security.conf"
+    sed -ri 's/^\s*SecRuleEngine\s+.*/SecRuleEngine DetectionOnly/I' "$CONF" || true
+    grep -qi '^\s*SecRuleEngine' "$CONF" || echo 'SecRuleEngine DetectionOnly' >> "$CONF"
+
+- name: Restart httpd to apply CRS and ModSecurity mode
+  command: systemctl restart httpd
