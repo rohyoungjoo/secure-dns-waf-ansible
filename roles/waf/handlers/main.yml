@@ -1,2 +1,6 @@
 ---
-# handlers file for roles/waf
+- name: restart httpd
+  systemd:
+    name: httpd
+    state: restarted
+

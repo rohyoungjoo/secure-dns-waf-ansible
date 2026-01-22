@@ -1,100 +1,168 @@
 ---
-# PC1-WAF: Install httpd + ModSecurity + OWASP CRS, activate, DetectionOnly
+# roles/waf/tasks/main.yml
+# PC1-WAF: Apache Reverse Proxy + ModSecurity + OWASP CRS (single-file)
 
-- name: Install required packages for WAF (httpd + mod_security + CRS + firewalld)
-  shell: |
-    set -e
-    dnf -y install epel-release || true
-    dnf -y install httpd firewalld mod_security mod_security_crs || \
-    dnf -y install httpd firewalld mod_security mod_security_crs-core || true
-  changed_when: false
+- name: Set variables (single-file defaults)
+  set_fact:
+    waf_backend: "http://10.2.2.101/"     # Ingress VIP
+    waf_servername: "waf.local"
+    waf_cert: "/etc/pki/tls/certs/waf.crt"
+    waf_key:  "/etc/pki/tls/private/waf.key"
+
+    # 1) 탐지만: DetectionOnly
+    # 2) 차단까지: On
+    waf_rule_engine: "On"     # <- 일단 차단 원하면 On, 테스트만이면 DetectionOnly
+
+    # CRS repo path
+    crs_dir: "/etc/httpd/modsecurity.d/owasp-crs"
+    crs_rules_enabled: "/etc/httpd/modsecurity.d/owasp-crs/rules-enabled"
+
+- name: Install required packages
+  command: dnf -y install httpd mod_ssl mod_security git firewalld
+  register: r_dnf
+  failed_when: false
+  changed_when: "'Complete!' in (r_dnf.stdout | default(''))"
 
 - name: Enable and start firewalld
   command: systemctl enable --now firewalld
 
-- name: Enable and start httpd
-  command: systemctl enable --now httpd
-
-- name: Open HTTP/HTTPS service (permanent)
+- name: Open 80/443 on firewalld (public)
   command: firewall-cmd --permanent --add-service=http --add-service=https
-  register: r_websvc
+  register: r_fw
   failed_when: false
-  changed_when: "'success' in (r_websvc.stdout | lower)"
+  changed_when: "'success' in (r_fw.stdout | lower)"
 
 - name: Reload firewalld
   command: firewall-cmd --reload
 
-# CRS 룰 경로 자동 탐색 + activated_rules에 심링크 활성화
-- name: Activate OWASP CRS rules into activated_rules (symlink)
-  shell: |
-    set -e
+- name: Ensure httpd enabled and started
+  command: systemctl enable --now httpd
 
-    CANDIDATES=(
-      "/usr/share/mod_modsecurity_crs/rules"
-      "/usr/share/modsecurity-crs/rules"
-      "/usr/share/owasp-modsecurity-crs/rules"
-      "/etc/modsecurity.d/owasp-crs/rules"
-    )
+# -----------------------------
+# TLS cert 준비 (없으면 self-signed 생성)
+# -----------------------------
+- name: Check cert/key exist
+  stat:
+    path: "{{ item }}"
+  loop:
+    - "{{ waf_cert }}"
+    - "{{ waf_key }}"
+  register: r_tls
 
-    SRC=""
-    for d in "${CANDIDATES[@]}"; do
-      if [ -d "$d" ] && ls "$d"/*.conf >/dev/null 2>&1; then
-        SRC="$d"
-        break
-      fi
-    done
+- name: Generate self-signed cert if missing
+  command: >
+    openssl req -x509 -newkey rsa:2048 -nodes
+    -keyout {{ waf_key }}
+    -out {{ waf_cert }}
+    -days 365
+    -subj "/CN={{ waf_servername }}"
+  when: >
+    (r_tls.results[0].stat.exists == false) or
+    (r_tls.results[1].stat.exists == false)
 
-    if [ -z "$SRC" ]; then
-      echo "[ERROR] CRS rules directory not found in candidates." >&2
-      exit 1
-    fi
+# -----------------------------
+# OWASP CRS 설치/정리
+#  - 중복 include로 id:900990 터지던 것 제거
+#  - scanners-user-agents.data 같은 data 파일도 rules-enabled에 링크
+# -----------------------------
+- name: Ensure ModSecurity base dir exists
+  file:
+    path: /etc/httpd/modsecurity.d
+    state: directory
+    mode: "0755"
 
-    DST="/etc/httpd/modsecurity.d/activated_rules"
-    mkdir -p "$DST"
+- name: Remove old CRS include leftovers that cause duplicate IDs (safe)
+  file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "/etc/httpd/modsecurity.d/crs-setup.conf"
+    - "/etc/httpd/modsecurity.d/owasp-crs.conf"
+    - "/etc/httpd/modsecurity.d/owasp-crs.conf.bak"
+  ignore_errors: true
 
-    for f in "$SRC"/*.conf; do
-      ln -sf "$f" "$DST/$(basename "$f")"
-    done
+- name: Clone OWASP CRS if not exists
+  command: git clone https://github.com/coreruleset/coreruleset.git "{{ crs_dir }}"
+  args:
+    creates: "{{ crs_dir }}/.git"
 
-    echo "Activated CRS from: $SRC"
-    echo "Count: $(ls -1 "$DST"/*.conf 2>/dev/null | wc -l)"
+- name: Ensure CRS setup conf present
+  command: cp -f "{{ crs_dir }}/crs-setup.conf.example" "{{ crs_dir }}/crs-setup.conf"
+  args:
+    creates: "{{ crs_dir }}/crs-setup.conf"
 
-# mod_security.conf는 copy로 안전하게 생성 (YAML 파싱 깨짐 방지)
-- name: Ensure mod_security.conf exists (create if missing)
+- name: Ensure rules-enabled directory exists
+  file:
+    path: "{{ crs_rules_enabled }}"
+    state: directory
+    mode: "0755"
+
+- name: Link CRS .conf into rules-enabled (force)
+  command: bash -lc 'ln -sf {{ crs_dir }}/rules/*.conf {{ crs_rules_enabled }}/'
+  changed_when: false
+
+- name: Link CRS .data into rules-enabled (fix scanners-user-agents.data missing)
+  command: bash -lc 'ls {{ crs_dir }}/rules/*.data >/dev/null 2>&1 && ln -sf {{ crs_dir }}/rules/*.data {{ crs_rules_enabled }}/ || true'
+  changed_when: false
+
+# -----------------------------
+# Apache 설정 파일 배포
+#   - ssl reverse proxy (443)
+#   - security headers
+#   - modsecurity + crs include
+# -----------------------------
+- name: Deploy security headers include
   copy:
-    dest: /etc/httpd/conf.d/mod_security.conf
+    src: security-headers.conf
+    dest: /etc/httpd/conf.d/security-headers.conf
     owner: root
     group: root
     mode: "0644"
-    force: false
+
+- name: Deploy SSL WAF vhost (reverse proxy to ingress vip)
+  copy:
+    src: ssl-waf.conf
+    dest: /etc/httpd/conf.d/ssl-waf.conf
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Write modsecurity custom include (CRS + 엔진 모드)
+  copy:
+    dest: /etc/httpd/conf.d/mod_security_custom.conf
+    owner: root
+    group: root
+    mode: "0644"
     content: |
       <IfModule security2_module>
-        SecRuleEngine DetectionOnly
+        # 엔진 모드: DetectionOnly(탐지) / On(차단)
+        SecRuleEngine {{ waf_rule_engine }}
+
+        # Audit log (기본 경로 확인용)
+        SecAuditEngine RelevantOnly
+        SecAuditLog /var/log/httpd/modsec_audit.log
+        SecAuditLogParts ABIJDEFHZ
+
+        # PCRE limit 에러 줄이기(너 로그에 exceeded 떠서)
+        SecPcreMatchLimit 200000
+        SecPcreMatchLimitRecursion 200000
+
+        # OWASP CRS 로딩(딱 한 군데만!)
+        Include {{ crs_dir }}/crs-setup.conf
+        Include {{ crs_rules_enabled }}/*.conf
       </IfModule>
 
-- name: Set SecRuleEngine to DetectionOnly (enforce)
-  shell: |
-    set -e
-    CONF="/etc/httpd/conf.d/mod_security.conf"
-    sed -ri 's/^\s*SecRuleEngine\s+.*/SecRuleEngine DetectionOnly/I' "$CONF" || true
-    grep -qi '^\s*SecRuleEngine' "$CONF" || echo 'SecRuleEngine DetectionOnly' >> "$CONF"
+# (중요) 패키지 기본 mod_security.conf가 activated_rules/*.conf를 include 하면 충돌 가능 → 주석처리/제거
+- name: Disable default activated_rules include if present
+  replace:
+    path: /etc/httpd/conf.d/mod_security.conf
+    regexp: '^\s*IncludeOptional\s+modsecurity\.d/activated_rules/\*\.conf\s*$'
+    replace: '# IncludeOptional modsecurity.d/activated_rules/*.conf'
+  ignore_errors: true
 
-- name: Apache configtest
+- name: Validate Apache config
   command: apachectl configtest
-  register: r_conf
-  changed_when: false
 
-- name: Restart httpd to apply CRS and ModSecurity mode
+- name: Restart httpd
   command: systemctl restart httpd
-
-- name: Health check (HTTP HEAD)
-  shell: |
-    set -e
-    curl -sI http://127.0.0.1/ | head -n 1
-  register: r_curl
-  changed_when: false
-
-- name: Show health check result
-  debug:
-    msg: "WAF httpd response: {{ r_curl.stdout }}"
 
