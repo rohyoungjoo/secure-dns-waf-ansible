@@ -12,7 +12,7 @@
     waf_servername: "{{ waf_servername | default('waf.local') }}"
     waf_cert: "{{ waf_cert | default('/etc/pki/tls/certs/waf.crt') }}"
     waf_key: "{{ waf_key | default('/etc/pki/tls/private/waf.key') }}"
-    waf_rule_engine: "{{ waf_rule_engine | default('On') }}"          # DetectionOnly / On
+    waf_rule_engine: "{{ waf_rule_engine | default('DetectionOnly') }}"  # DetectionOnly / On
     crs_dir: "{{ crs_dir | default('/etc/httpd/modsecurity.d/owasp-crs') }}"
     crs_rules_enabled: "{{ crs_rules_enabled | default('/etc/httpd/modsecurity.d/owasp-crs/rules-enabled') }}"
     waf_offline: "{{ waf_offline | default(false) }}"
@@ -37,7 +37,7 @@
         name: firewalld
         enabled: true
         state: started
-  
+
   when:
     - not ansible_check_mode
     - not (waf_offline | bool)
@@ -132,7 +132,7 @@
     mode: "0644"
   when:
     - not ansible_check_mode
-    - not waf_offline
+    - not (waf_offline | bool)
   failed_when: false
 
 - name: Ensure rules-enabled directory exists
@@ -202,6 +202,14 @@
     path: /etc/httpd/conf.d/mod_security.conf
     regexp: '^\s*IncludeOptional\s+modsecurity\.d/activated_rules/\*\.conf\s*$'
     replace: '# IncludeOptional modsecurity.d/activated_rules/*.conf'
+  when: r_modsec_default.stat.exists
+  failed_when: false
+
+- name: Ensure SecRuleEngine On is disabled in default mod_security.conf
+  replace:
+    path: /etc/httpd/conf.d/mod_security.conf
+    regexp: '^\s*SecRuleEngine\s+On\s*$'
+    replace: '# SecRuleEngine On'
   when: r_modsec_default.stat.exists
   failed_when: false
 
