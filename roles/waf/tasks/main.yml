@@ -3,9 +3,13 @@
 # Apache Reverse Proxy + ModSecurity + OWASP CRS
 # 목표:
 #  - 재배포 시 중복 include / RuleID 중복 방지
-#  - 운영(DTECTIONOnly) / 발표(On + 403 보장) 둘 다 지원
-#  - audit 로그는 환경별 이슈 고려하여 기본 Off (error_log로 검증)
+#  - 운영(DetectionOnly) / 발표(On + 403 보장) 둘 다 지원
+#  - audit 로그는 옵션(환경별 이슈) / 기본은 error_log로 검증
+#  - offline(test)에서도 플레이북이 끝까지 돌도록 waf_offline 지원
 
+# ------------------------------------------------------------
+# 0) Variables (allow override from inventory/group_vars)
+# ------------------------------------------------------------
 - name: Set variables (defaults, but keep overrides)
   set_fact:
     waf_backend: "{{ waf_backend | default('http://10.2.2.101/') }}"
@@ -14,13 +18,15 @@
     waf_key: "{{ waf_key | default('/etc/pki/tls/private/waf.key') }}"
     waf_rule_engine: "{{ waf_rule_engine | default('DetectionOnly') }}"   # DetectionOnly / On
     waf_demo_block_enable: "{{ waf_demo_block_enable | default(false) }}" # 발표용 403 보장 룰
-    waf_audit_enable: "{{ waf_audit_enable | default(false) }}"           # audit 기본 Off
+    waf_audit_enable: "{{ waf_audit_enable | default(false) }}"           # audit 옵션
     waf_audit_log: "{{ waf_audit_log | default('/var/log/httpd/modsec_audit.log') }}"
     crs_dir: "{{ crs_dir | default('/etc/httpd/modsecurity.d/owasp-crs') }}"
     crs_rules_enabled: "{{ crs_rules_enabled | default('/etc/httpd/modsecurity.d/owasp-crs/rules-enabled') }}"
     waf_offline: "{{ waf_offline | default(false) }}"
 
+# ------------------------------------------------------------
 # 1) Packages / Services (offline면 스킵)
+# ------------------------------------------------------------
 - block:
     - name: Install required packages
       dnf:
@@ -61,7 +67,9 @@
     state: started
   failed_when: false
 
+# ------------------------------------------------------------
 # 2) TLS cert (self-signed if missing)
+# ------------------------------------------------------------
 - name: Check cert/key exist
   stat:
     path: "{{ item }}"
@@ -82,24 +90,28 @@
     - (r_tls.results[0].stat.exists == false) or (r_tls.results[1].stat.exists == false)
   failed_when: false
 
+# ------------------------------------------------------------
 # 3) CRS install / rules-enabled 구성
+# ------------------------------------------------------------
 - name: Ensure ModSecurity base dir exists
   file:
     path: /etc/httpd/modsecurity.d
     state: directory
     mode: "0755"
 
-- name: Remove old CRS include leftovers that cause duplicate IDs (safe)
+# 과거 수동 디버깅 파일/중복 include 파일들 제거(재배포 안정화)
+- name: Remove old include leftovers that cause duplicate IDs (safe)
   file:
     path: "{{ item }}"
     state: absent
   loop:
-    - "/etc/httpd/modsecurity.d/crs-setup.conf"
-    - "/etc/httpd/modsecurity.d/owasp-crs.conf"
+    - "/etc/httpd/modsecurity.d/crs-setup.conf"          # (X) 과거 위치
+    - "/etc/httpd/modsecurity.d/owasp-crs.conf"          # (X) 과거 위치
     - "/etc/httpd/modsecurity.d/owasp-crs.conf.bak"
-    - "/etc/httpd/conf.d/modsecurity-crs.conf"
-    - "/etc/httpd/conf.d/zzz-modsec-audit.conf"
-    - "/etc/httpd/conf.d/zzz-modsec-global.conf"
+    - "/etc/httpd/conf.d/modsecurity-crs.conf"           # (X) activated_rules include 임시파일
+    - "/etc/httpd/conf.d/zzz-modsec-audit.conf"          # (X) 수동 디버깅
+    - "/etc/httpd/conf.d/zzz-modsec-global.conf"         # (X) 수동 디버깅
+    - "/etc/httpd/conf.d/zzz-modsec-*.conf"              # (X) 혹시 남아있으면 전부 제거
   ignore_errors: true
 
 - name: Clone OWASP CRS if not exists (skip in offline mode)
@@ -140,7 +152,9 @@
   command: bash -lc 'test -d {{ crs_dir }}/rules && ls {{ crs_dir }}/rules/*.data >/dev/null 2>&1 && ln -sf {{ crs_dir }}/rules/*.data {{ crs_rules_enabled }}/ || true'
   changed_when: false
 
+# ------------------------------------------------------------
 # 4) Apache conf deploy
+# ------------------------------------------------------------
 - name: Deploy security headers include
   copy:
     src: security-headers.conf
@@ -157,7 +171,11 @@
     group: root
     mode: "0644"
 
-# 5) 핵심: ModSecurity custom conf는 템플릿으로 단일화
+# ------------------------------------------------------------
+# 5) 핵심: ModSecurity custom conf는 템플릿으로 단일화 (Single Source of Truth)
+#    - CRS include도 여기서만 수행
+#    - audit 옵션도 여기서만 제어
+# ------------------------------------------------------------
 - name: Deploy modsecurity custom include (single source of truth)
   template:
     src: mod_security_custom.conf.j2
@@ -166,7 +184,9 @@
     group: root
     mode: "0644"
 
-# 6) 기본 mod_security.conf의 activated_rules include는 반드시 비활성(중복 RuleID 방지)
+# ------------------------------------------------------------
+# 6) 기본 mod_security.conf의 activated_rules include 비활성 (중복 RuleID 방지)
+# ------------------------------------------------------------
 - name: Check default mod_security.conf exists
   stat:
     path: /etc/httpd/conf.d/mod_security.conf
@@ -180,7 +200,9 @@
   when: r_modsec_default.stat.exists
   failed_when: false
 
+# ------------------------------------------------------------
 # 7) 발표용 403 보장 룰 (옵션)
+# ------------------------------------------------------------
 - name: Deploy demo blocking rule (optional)
   template:
     src: zz-test-rule.conf.j2
@@ -196,7 +218,9 @@
     state: absent
   when: not (waf_demo_block_enable | bool)
 
+# ------------------------------------------------------------
 # 8) Validate + restart
+# ------------------------------------------------------------
 - name: Validate Apache config (best effort)
   command: apachectl configtest
   register: r_cfg
@@ -208,3 +232,4 @@
     name: httpd
     state: restarted
   failed_when: false
+

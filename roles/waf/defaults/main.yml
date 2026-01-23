@@ -1,2 +1,6 @@
 ---
 # defaults file for roles/waf
+waf_backend: "http://127.0.0.1:8080/"
+waf_rule_engine: "On"          # DetectionOnly | On
+waf_demo_block_enable: true    # 차단 시연용
+
