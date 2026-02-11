@@ -1,0 +1,28 @@
+# /etc/nginx/modsecurity.conf
+
+# Engine mode: DetectionOnly or On
+SecRuleEngine {{ waf_rule_engine }}
+
+# Request body
+SecRequestBodyAccess On
+
+# Audit (optional)
+{% if waf_audit_enable | bool %}
+SecAuditEngine RelevantOnly
+SecAuditLog /var/log/modsecurity/audit.log
+SecAuditLogFormat JSON
+{% else %}
+SecAuditEngine Off
+{% endif %}
+
+# Performance safety
+SecPcreMatchLimit 200000
+SecPcreMatchLimitRecursion 200000
+
+# CRS load (ONLY ONCE)
+Include "{{ crs_dir }}/crs-setup.conf"
+Include "{{ crs_rules_enabled }}/*.conf"
+
+# Custom rules (single source of truth)
+Include "{{ modsec_custom_rules }}"
+

@@ -11,8 +11,3 @@
   roles:
     - waf
 
-- name: Configure DNS server
-  hosts: dns
-  become: true
-  roles:
-    - dns

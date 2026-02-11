@@ -5,4 +5,9 @@ waf_offline: false
 waf_rule_engine: "On"
 
 # Ingress VIP 없이 테스트할 때(프록시 백엔드 의미없게)
-waf_backend: "http://127.0.0.1/"
+waf_backend: "http://10.2.2.101:30080"
+waf_servername: "cafekec.shop"
+
+# TLS 경로 (nginx-waf.conf.j2에서 필요)
+waf_cert: "/etc/pki/tls/certs/waf.crt"
+waf_key: "/etc/pki/tls/private/waf.key"

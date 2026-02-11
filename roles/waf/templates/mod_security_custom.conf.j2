@@ -1,23 +1,11 @@
-<IfModule security2_module>
-  # Engine mode: DetectionOnly or On
-  SecRuleEngine {{ waf_rule_engine }}
+# /etc/nginx/modsecurity.d/modsecurity_custom.conf
 
-  # Audit (optional) - default OFF to avoid 환경별 이슈
-  {% if waf_audit_enable | bool %}
-  SecAuditEngine On
-  SecAuditLogType Serial
-  SecAuditLog {{ waf_audit_log }}
-  SecAuditLogParts ABIJDEFHZ
-  {% else %}
-  SecAuditEngine Off
-  {% endif %}
+# 오탐 예외 / 커스텀 룰은 여기서만 관리
 
-  # Performance safety
-  SecPcreMatchLimit 200000
-  SecPcreMatchLimitRecursion 200000
+# 예) 헬스체크 제외
+# SecRule REQUEST_URI "@beginsWith /health" "id:100010,phase:1,pass,nolog,ctl:ruleEngine=Off"
 
-  # CRS load (ONLY ONCE)
-  Include {{ crs_dir }}/crs-setup.conf
-  Include {{ crs_rules_enabled }}/*.conf
+{% if waf_demo_block_enable | bool %}
+Include "{{ modsec_demo_rules }}"
+{% endif %}
 
-</IfModule>
